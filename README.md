@@ -2,6 +2,17 @@
 
 A sidebar plugin for Binary Ninja that provides IDA-style byte pattern signature scanning and generation.
 
+## Screenshots
+
+### Sidebar with scan results
+![Sidebar](screenshots/sidebar.png)
+
+### Context menu on results
+![Context Menu](screenshots/context_menu.png)
+
+### Generate signature from disassembly
+![Generate Sig](screenshots/generate_sig.png)
+
 ## Features
 
 ### Signature Scanning
