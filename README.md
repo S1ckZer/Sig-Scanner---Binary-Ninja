@@ -21,11 +21,25 @@ A sidebar plugin for Binary Ninja that provides IDA-style byte pattern signature
 
 ## Installation
 
-Copy the `sigscanner` folder to your Binary Ninja plugins directory:
+Clone this repo into your Binary Ninja plugins directory as `sigscanner`:
 
-- **Windows:** `%APPDATA%\Binary Ninja\plugins\`
-- **macOS:** `~/Library/Application Support/Binary Ninja/plugins/`
-- **Linux:** `~/.binaryninja/plugins/`
+**Windows:**
+```
+cd "%APPDATA%\Binary Ninja\plugins"
+git clone https://github.com/S1ckZer/Sig-Scanner---Binary-Ninja.git sigscanner
+```
+
+**macOS:**
+```
+cd ~/Library/Application\ Support/Binary\ Ninja/plugins
+git clone https://github.com/S1ckZer/Sig-Scanner---Binary-Ninja.git sigscanner
+```
+
+**Linux:**
+```
+cd ~/.binaryninja/plugins
+git clone https://github.com/S1ckZer/Sig-Scanner---Binary-Ninja.git sigscanner
+```
 
 ## Usage
 
