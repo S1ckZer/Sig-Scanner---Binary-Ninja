@@ -88,11 +88,39 @@ if binaryninja.core_ui_enabled():
 
     # ── Sig Generator ────────────────────────────────────────────────────
 
+    def _find_displacement_bytes(raw, current_addr, instr_length, ref_addr):
+        """
+        Locate the 4-byte RIP-relative displacement encoding within a raw
+        instruction and return (start_index, end_index) — exclusive end.
+        Returns (None, None) if not found.
+
+        For RIP-relative addressing the CPU adds the displacement to the
+        address of the *next* instruction (current_addr + instr_length).
+        """
+        next_addr = current_addr + instr_length
+        disp = ref_addr - next_addr
+        try:
+            disp_bytes = disp.to_bytes(4, byteorder="little", signed=True)
+        except OverflowError:
+            return None, None
+        raw_bytes = bytes(raw)
+        idx = raw_bytes.find(disp_bytes)
+        if idx != -1:
+            return idx, idx + 4
+        return None, None
+
     def generate_sig_at(bv, addr, num_instructions=10):
         """
         Generate a signature from an address.
         Returns list of (byte_value, is_wildcard, instr_index) tuples.
-        Each instruction's operand bytes (refs/immediates) become wildcards.
+
+        Relocatable operand bytes (RIP-relative displacements and branch
+        targets) are found by computing the expected encoded displacement and
+        searching for it inside the raw instruction bytes.  This correctly
+        handles instructions that carry BOTH a mid-instruction RIP-relative
+        address and a trailing immediate (e.g. ``cmp [rip+x], imm8`` or
+        ``mov [rip+x], imm32``) — the old length-based heuristic failed on
+        those because it only wildcarded the final 4 bytes.
         """
         if not bv.arch:
             return [], []
@@ -116,56 +144,58 @@ if binaryninja.core_ui_enabled():
                 tokens, _ = text_result
                 disasm = "".join(str(t) for t in tokens)
 
-            # Check if instruction has references (relocatable operands)
-            has_refs = False
+            # Collect all referenced addresses from this instruction so we can
+            # locate their encoded displacement bytes precisely.
+            ref_addrs = []
             code_refs = list(bv.get_code_refs_from(current_addr))
             data_refs = list(bv.get_data_refs_from(current_addr, info.length))
-            if code_refs or data_refs:
-                has_refs = True
+            ref_addrs.extend(r.address if hasattr(r, "address") else r for r in code_refs)
+            ref_addrs.extend(r.address if hasattr(r, "address") else r for r in data_refs)
 
-            # Also check branches for relative targets
-            has_branch_target = False
+            # Also collect branch targets.
             if info.branches:
                 for br in info.branches:
-                    if br.target != 0:
-                        has_branch_target = True
-                        break
+                    if br.target and br.target != 0:
+                        ref_addrs.append(br.target)
 
-            # Determine which bytes to wildcard
-            # For x86/x64: opcode is typically 1-3 bytes, operand is the rest
-            # If instruction has refs or branches, wildcard the operand bytes
-            wildcard_from = info.length  # default: no wildcards
-            if has_refs or has_branch_target:
-                # Heuristic: operand is last 1, 2, or 4 bytes
-                op_len = info.length
-                if op_len > 5:
-                    wildcard_from = op_len - 4
-                elif op_len > 3:
-                    wildcard_from = op_len - 4 if op_len >= 5 else op_len - (op_len - 1)
-                elif op_len > 1:
-                    wildcard_from = 1
-                # For common patterns, use known operand sizes
-                first_byte = raw[0] if raw else 0
-                if info.length >= 5:
-                    wildcard_from = info.length - 4
-                elif info.length >= 3:
-                    wildcard_from = info.length - 2 if info.length <= 4 else info.length - 4
-                elif info.length == 2:
-                    wildcard_from = 1
+            has_refs = bool(ref_addrs)
+
+            # Build a set of byte indices that belong to relocatable fields.
+            wildcard_indices = set()
+            if has_refs:
+                for ref_addr_val in ref_addrs:
+                    start, end = _find_displacement_bytes(
+                        raw, current_addr, info.length, ref_addr_val
+                    )
+                    if start is not None:
+                        for k in range(start, end):
+                            wildcard_indices.add(k)
+
+                # Fallback: if displacement-byte search found nothing (e.g. a
+                # short branch whose 1-byte offset was not located as a full
+                # 4-byte field), fall back to the safe heuristic of wildcarding
+                # everything after the first opcode byte.
+                if not wildcard_indices:
+                    wc_from = (
+                        info.length - 4 if info.length >= 5
+                        else 1 if info.length >= 2
+                        else 0
+                    )
+                    for k in range(wc_from, info.length):
+                        wildcard_indices.add(k)
 
             instr_boundaries.append({
                 "addr": current_addr,
                 "offset": len(sig_bytes),
                 "length": info.length,
                 "disasm": disasm,
-                "has_refs": has_refs or has_branch_target,
+                "has_refs": has_refs,
             })
 
             for j in range(info.length):
-                is_wc = (has_refs or has_branch_target) and j >= wildcard_from
                 sig_bytes.append({
                     "value": raw[j],
-                    "wildcard": is_wc,
+                    "wildcard": j in wildcard_indices,
                     "marked": False,
                     "instr_idx": i,
                 })
@@ -361,16 +391,38 @@ if binaryninja.core_ui_enabled():
                         b["wildcard"] = False
                         b["marked"] = True
             else:
-                # fixed -> wildcard (only operand bytes)
+                # fixed -> wildcard
+                # Re-run displacement detection to restore the correct wildcards.
                 if ib["has_refs"]:
-                    # Re-wildcard the operand bytes
-                    length = ib["length"]
-                    wc_from = length - 4 if length >= 5 else (length - 2 if length >= 3 else 1)
+                    raw = self.bv.read(ib["addr"], ib["length"])
+                    code_refs = list(self.bv.get_code_refs_from(ib["addr"]))
+                    data_refs = list(self.bv.get_data_refs_from(ib["addr"], ib["length"]))
+                    ref_addrs = []
+                    ref_addrs.extend(r.address if hasattr(r, "address") else r for r in code_refs)
+                    ref_addrs.extend(r.address if hasattr(r, "address") else r for r in data_refs)
+                    instr_data = self.bv.read(ib["addr"], self.bv.arch.max_instr_length)
+                    info = self.bv.arch.get_instruction_info(instr_data, ib["addr"])
+                    if info and info.branches:
+                        for br in info.branches:
+                            if br.target and br.target != 0:
+                                ref_addrs.append(br.target)
+                    wildcard_indices = set()
+                    for ref_addr_val in ref_addrs:
+                        start, end = _find_displacement_bytes(
+                            raw, ib["addr"], ib["length"], ref_addr_val
+                        )
+                        if start is not None:
+                            for k in range(start, end):
+                                wildcard_indices.add(k)
+                    if not wildcard_indices:
+                        length = ib["length"]
+                        wc_from = length - 4 if length >= 5 else (1 if length >= 2 else 0)
+                        wildcard_indices = set(range(wc_from, length))
                     for j, b in enumerate(instr_bytes):
-                        if j >= wc_from:
+                        if j in wildcard_indices:
                             b["wildcard"] = True
                 else:
-                    # No refs: wildcard all operand bytes (skip first byte as opcode)
+                    # No refs: wildcard everything after the first opcode byte
                     for j, b in enumerate(instr_bytes):
                         if j >= 1:
                             b["wildcard"] = True
